@@ -1,0 +1,313 @@
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba32f) uniform image2D outputImage;
+
+uniform vec2  uResolution;
+uniform uint  uNumVertices;
+uniform uint  uNumTriangles;
+uniform uint  uFrameIndex;
+uniform int   uMode;        // 0=full, 1=diffuse debug, 2=bounce heatmap
+uniform vec2  uCenterXZ;
+uniform float uRadius;
+
+layout(std430, binding = 0) readonly buffer Vertices {
+    vec4 posNormal[];
+};
+
+layout(std430, binding = 1) readonly buffer Triangles {
+    uvec4 triangles[];
+};
+
+struct Hit {
+    float t;
+    int   triId;
+    vec3  normal;
+};
+
+vec3 getPosition(uint vertexIndex) {
+    uint base = vertexIndex * 2u;
+    return posNormal[base].xyz;
+}
+
+vec3 getNormal(uint vertexIndex) {
+    uint base = vertexIndex * 2u + 1u;
+    return normalize(posNormal[base].xyz);
+}
+
+bool rayTriangleIntersect(vec3 orig, vec3 dir, uint triIdx, out Hit hit) {
+    uvec4 tri = triangles[triIdx];
+    vec3 v0 = getPosition(tri.x);
+    vec3 v1 = getPosition(tri.y);
+    vec3 v2 = getPosition(tri.z);
+
+    vec3 e1 = v1 - v0;
+    vec3 e2 = v2 - v0;
+    vec3 p  = cross(dir, e2);
+    float det = dot(e1, p);
+    if (abs(det) < 1e-6) return false;
+
+    float invDet = 1.0 / det;
+    vec3 tvec = orig - v0;
+    float u = dot(tvec, p) * invDet;
+    if (u < 0.0 || u > 1.0) return false;
+
+    vec3 q = cross(tvec, e1);
+    float v = dot(q, dir) * invDet;
+    if (v < 0.0 || u + v > 1.0) return false;
+
+    float t = dot(e2, q) * invDet;
+    if (t <= 1e-4) return false;
+
+    float w = 1.0 - u - v;
+    vec3 n0 = getNormal(tri.x);
+    vec3 n1 = getNormal(tri.y);
+    vec3 n2 = getNormal(tri.z);
+    vec3 n  = normalize(w * n0 + u * n1 + v * n2);
+
+    hit.t      = t;
+    hit.triId  = int(triIdx);
+    hit.normal = n;
+    return true;
+}
+
+// RNG
+uint hash_u32(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+float rand01(inout uint state) {
+    state = hash_u32(state);
+    return float(state) / 4294967296.0;
+}
+
+// Dielectric helpers
+float fresnelSchlick(float cosTheta, float etaI, float etaT) {
+    float r0 = (etaI - etaT) / (etaI + etaT);
+    r0 = r0 * r0;
+    float m = 1.0 - cosTheta;
+    return r0 + (1.0 - r0) * m * m * m * m * m;
+}
+bool refractRay(vec3 I, vec3 N, float etaI, float etaT, out vec3 T) {
+    float eta  = etaI / etaT;
+    float cosI = clamp(-dot(N, I), -1.0, 1.0);
+    float sin2T = eta * eta * (1.0 - cosI * cosI);
+    if (sin2T > 1.0) return false;
+    float cosT = sqrt(1.0 - sin2T);
+    T = normalize(eta * I + (eta * cosI - cosT) * N);
+    return true;
+}
+float iorDiamondForChannel(int c) {
+    if (c == 0) return 2.41;
+    if (c == 1) return 2.44;
+    return 2.47;
+}
+
+// Environment: white dome above dark
+vec3 sampleEnvironment(vec3 dir) {
+    float up = max(dir.y, 0.0);
+    float dome = smoothstep(0.7, 1.0, up);
+    return vec3(0.01) + vec3(0.6) * dome;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(uResolution.x) || pixel.y >= int(uResolution.y)) return;
+
+    // Shared camera: centered top view
+    vec2 pixCenter = (vec2(pixel) + 0.5) / uResolution;
+    vec2 ndc       = pixCenter * 2.0 - 1.0;
+
+    float radiusXZ = uRadius;
+    float camY     = radiusXZ * 3.0;
+
+    float baseX = uCenterXZ.x + ndc.x * radiusXZ;
+    float baseZ = uCenterXZ.y + ndc.y * radiusXZ;
+
+    // ---- Mode 1: diffuse debug ----
+    if (uMode == 1) {
+        vec3 rayOrigin = vec3(baseX, camY, baseZ);
+        vec3 rayDir    = vec3(0.0, -1.0, 0.0);
+
+        Hit closest;
+        closest.t = 1e30;
+        bool hit = false;
+        for (uint i = 0u; i < uNumTriangles; ++i) {
+            Hit h;
+            if (rayTriangleIntersect(rayOrigin, rayDir, i, h) && h.t < closest.t) {
+                closest = h;
+                hit = true;
+            }
+        }
+
+        vec3 col = vec3(0.0);
+        if (hit) {
+            vec3 N = normalize(closest.normal);
+            if (N.y < 0.0) N = -N;
+            vec3 lightDir = normalize(vec3(0.0, -1.0, 0.0));
+            float ndotl = max(dot(N, -lightDir), 0.0);
+            float diffuse = pow(ndotl, 0.6);
+            float r = length(vec2(baseX - uCenterXZ.x, baseZ - uCenterXZ.y));
+            float vignette = smoothstep(radiusXZ, 0.0, r);
+            float b = diffuse * vignette;
+            col = vec3(0.15) + vec3(0.85) * b;
+        }
+
+        imageStore(outputImage, pixel, vec4(col, 1.0));
+        return;
+    }
+
+    uint seed = uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^ uFrameIndex * 26699u;
+
+    // ---- Mode 2: bounce-count heatmap ----
+    if (uMode == 2) {
+        const int MAX_DEPTH = 10;
+        int bounceCount = 0;
+
+        vec3 rayOrigin = vec3(baseX, camY, baseZ);
+        vec3 rayDir    = vec3(0.0, -1.0, 0.0);
+        bool insideDiamond = false;
+
+        for (int depth = 0; depth < MAX_DEPTH; ++depth) {
+            Hit closest;
+            closest.t = 1e30;
+            bool hit = false;
+            for (uint i = 0u; i < uNumTriangles; ++i) {
+                Hit h;
+                if (rayTriangleIntersect(rayOrigin, rayDir, i, h) && h.t < closest.t) {
+                    closest = h;
+                    hit = true;
+                }
+            }
+            if (!hit) break;
+            ++bounceCount;
+
+            vec3 N = normalize(closest.normal);
+            if (dot(N, rayDir) > 0.0) N = -N;
+
+            float etaAir = 1.0;
+            float etaDiamond = 2.42;
+            float etaI = insideDiamond ? etaDiamond : etaAir;
+            float etaT = insideDiamond ? etaAir     : etaDiamond;
+
+            vec3 refrDir;
+            bool canRefract = refractRay(rayDir, N, etaI, etaT, refrDir);
+            vec3 reflDir = reflect(rayDir, N);
+
+            if (canRefract) {
+                insideDiamond = !insideDiamond;
+                rayDir = normalize(refrDir);
+            } else {
+                rayDir = normalize(reflDir);
+            }
+            rayOrigin = rayOrigin + rayDir * (closest.t + 1e-3);
+        }
+
+        float t = clamp(float(bounceCount) / 8.0, 0.0, 1.0);
+        vec3 heat = vec3(t, t*t, t*t*t);
+        imageStore(outputImage, pixel, vec4(heat, 1.0));
+        return;
+    }
+
+    // ---- Mode 0: full dielectric + dispersion ----
+
+    const int SAMPLES_PER_FRAME = 2;
+    const int MAX_DEPTH = 6;
+
+    vec3 sampleSum = vec3(0.0);
+
+    for (int s = 0; s < SAMPLES_PER_FRAME; ++s) {
+        float rchan = rand01(seed);
+        int channel;
+        if (rchan < 1.0/3.0)      channel = 0;
+        else if (rchan < 2.0/3.0) channel = 1;
+        else                      channel = 2;
+
+        float etaAir     = 1.0;
+        float etaDiamond = iorDiamondForChannel(channel);
+
+        vec2 jitter = vec2(rand01(seed), rand01(seed));
+        vec2 uv  = (vec2(pixel) + jitter) / uResolution;
+        vec2 ndcJ = uv * 2.0 - 1.0;
+        float xj = uCenterXZ.x + ndcJ.x * radiusXZ;
+        float zj = uCenterXZ.y + ndcJ.y * radiusXZ;
+
+        vec3 rayOrigin = vec3(xj, camY, zj);
+        vec3 rayDir    = vec3(0.0, -1.0, 0.0);
+
+        float throughput = 1.0;
+        float radiance   = 0.0;
+        bool insideDiamond = false;
+
+        for (int depth = 0; depth < MAX_DEPTH; ++depth) {
+            Hit closest;
+            closest.t = 1e30;
+            bool hit = false;
+            for (uint i = 0u; i < uNumTriangles; ++i) {
+                Hit h;
+                if (rayTriangleIntersect(rayOrigin, rayDir, i, h) && h.t < closest.t) {
+                    closest = h;
+                    hit = true;
+                }
+            }
+            if (!hit) {
+                vec3 env = sampleEnvironment(rayDir);
+                radiance += throughput * env[channel];
+                break;
+            }
+
+            vec3 N = normalize(closest.normal);
+            if (dot(N, rayDir) > 0.0) N = -N;
+            vec3 hitPoint = rayOrigin + rayDir * closest.t;
+
+            if (insideDiamond) {
+                vec3 sigma = vec3(0.02, 0.02, 0.03);
+                float sig  = sigma[channel];
+                throughput *= exp(-sig * closest.t);
+            }
+
+            float etaI = insideDiamond ? etaDiamond : etaAir;
+            float etaT = insideDiamond ? etaAir     : etaDiamond;
+
+            float cosThetaI = clamp(-dot(N, rayDir), 0.0, 1.0);
+            float F = fresnelSchlick(cosThetaI, etaI, etaT);
+
+            vec3 reflDir = reflect(rayDir, N);
+            vec3 refrDir;
+            bool canRefract = refractRay(rayDir, N, etaI, etaT, refrDir);
+
+            float xi = rand01(seed);
+            bool doReflect = (!canRefract) || (xi < F);
+
+            if (doReflect) {
+                rayDir = normalize(reflDir);
+                rayOrigin = hitPoint + rayDir * 1e-3;
+            } else {
+                insideDiamond = !insideDiamond;
+                rayDir = normalize(refrDir);
+                rayOrigin = hitPoint + rayDir * 1e-3;
+            }
+
+            if (depth >= 3) {
+                float p = clamp(throughput, 0.1, 0.95);
+                if (rand01(seed) > p) break;
+                throughput /= p;
+            }
+        }
+
+        vec3 rgb = vec3(0.0);
+        rgb[channel] = radiance;
+        sampleSum += rgb;
+    }
+
+    vec3 frameColor = sampleSum / float(SAMPLES_PER_FRAME);
+
+    vec4 prev = imageLoad(outputImage, pixel);
+    vec3 newAccum = prev.rgb + frameColor;
+    imageStore(outputImage, pixel, vec4(newAccum, 1.0));
+}

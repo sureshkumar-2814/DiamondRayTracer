@@ -1,0 +1,24 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build",
+            "type": "shell",
+            "command": "C:/msys64/ucrt64/bin/g++.exe",
+            "args": [
+                "-std=c++17",
+                "-I${workspaceFolder}/include",
+                "${workspaceFolder}/src/main.cpp",
+                "${workspaceFolder}/src/glad.c",
+                "-LC:/msys64/ucrt64/lib",
+                "-lglfw3", "-lassimp",
+                "-lopengl32",
+                "-lgdi32",
+                "-o",
+                "${workspaceFolder}/build/diamond_rt.exe"
+            ],
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": ["$gcc"]
+        }
+    ]
+}
