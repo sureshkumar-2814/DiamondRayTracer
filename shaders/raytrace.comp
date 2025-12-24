@@ -216,8 +216,8 @@ void main() {
 
     // ---- Mode 0: full dielectric + dispersion ----
 
-    const int SAMPLES_PER_FRAME = 2;
-    const int MAX_DEPTH = 6;
+    const int SAMPLES_PER_FRAME = 1;
+    const int MAX_DEPTH = 8;
 
     vec3 sampleSum = vec3(0.0);
 
@@ -266,10 +266,11 @@ void main() {
             vec3 hitPoint = rayOrigin + rayDir * closest.t;
 
             if (insideDiamond) {
-                vec3 sigma = vec3(0.02, 0.02, 0.03);
+                vec3 sigma = vec3(0.03, 0.03, 0.04); // slightly more attenuation
                 float sig  = sigma[channel];
                 throughput *= exp(-sig * closest.t);
             }
+
 
             float etaI = insideDiamond ? etaDiamond : etaAir;
             float etaT = insideDiamond ? etaAir     : etaDiamond;
@@ -293,11 +294,12 @@ void main() {
                 rayOrigin = hitPoint + rayDir * 1e-3;
             }
 
-            if (depth >= 3) {
-                float p = clamp(throughput, 0.1, 0.95);
+            if (depth >= 4) {                  // start a bit later
+                float p = clamp(throughput, 0.05, 0.95);
                 if (rand01(seed) > p) break;
                 throughput /= p;
             }
+
         }
 
         vec3 rgb = vec3(0.0);

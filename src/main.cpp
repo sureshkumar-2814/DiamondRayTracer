@@ -13,6 +13,34 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
+#include <cstdio>
+#include <cstring>
+
+// Pure OpenGL PNG save - NO external libs
+bool saveScreenshot(const char* filename, int width, int height) {
+    std::vector<unsigned char> pixels(3 * width * height);
+    glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    
+    // Flip Y
+    for (int i = 0; i < height / 2; ++i) {
+        int top = 3 * width * i;
+        int bot = 3 * width * (height - 1 - i);
+        for (int j = 0; j < 3 * width; ++j) {
+            std::swap(pixels[top + j], pixels[bot + j]);
+        }
+    }
+    
+    // Simple PPM format (opens everywhere, no PNG complexity)
+    FILE* f = fopen(filename, "wb");
+    if (!f) return false;
+    fprintf(f, "P6\n%d %d\n255\n", width, height);
+    fwrite(pixels.data(), 1, 3 * width * height, f);
+    fclose(f);
+    printf("Saved %s\n", filename);
+    return true;
+}
+
+
 const int WINDOW_WIDTH  = 1280;
 const int WINDOW_HEIGHT = 720;
 
@@ -258,8 +286,15 @@ int main() {
         glfwTerminate();
         return -1;
     }
+    // Get window size
+    int width, height;
+    glfwGetFramebufferSize(window, &width, &height);
 
-    glViewport(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+    // Use square region centered in window
+    int size = std::min(width, height);
+    int x = (width - size) / 2;
+    int y = (height - size) / 2;
+    glViewport(x, y, size, size);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 
     GLuint vao = 0;
@@ -339,7 +374,7 @@ int main() {
                     WINDOW_WIDTH, WINDOW_HEIGHT,
                     GL_RGBA, GL_FLOAT, zeroData.data());
 
-    const uint32_t MAX_FRAMES = 200;
+    const uint32_t MAX_FRAMES = 1000;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -387,6 +422,15 @@ int main() {
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
         glfwSwapBuffers(window);
+
+        if (gFrameIndex >= 500 && (gFrameIndex % 100 == 0)) {
+            int width, height;
+            glfwGetFramebufferSize(window, &width, &height);
+            char filename[64];
+            snprintf(filename, sizeof(filename), "diamond_%04d.ppm", gFrameIndex);
+            saveScreenshot(filename, width, height);
+        }
+
     }
 
     glDeleteProgram(computeProgram);
