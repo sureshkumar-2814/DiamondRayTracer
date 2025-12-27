@@ -280,8 +280,8 @@ int main() {
     std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
     std::cout << "Renderer: "      << glGetString(GL_RENDERER) << std::endl;
 
-    if (!loadOBJ_Assimp("models/diamond.obj")) {
-        std::cerr << "Failed to load models/diamond.obj\n";
+    if (!loadOBJ_Assimp("models/diamond3.obj")) {
+        std::cerr << "Failed to load models/diamond3.obj\n";
         glfwDestroyWindow(window);
         glfwTerminate();
         return -1;
