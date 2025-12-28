@@ -1,3 +1,4 @@
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -5,23 +6,19 @@
 #include <vector>
 #include <cstdint>
 #include <algorithm>
-
+#include <chrono>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
-
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
-
 #include <cstdio>
 #include <cstring>
 
-// Pure OpenGL PNG save - NO external libs
 bool saveScreenshot(const char* filename, int width, int height) {
     std::vector<unsigned char> pixels(3 * width * height);
     glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
-    
-    // Flip Y
+
     for (int i = 0; i < height / 2; ++i) {
         int top = 3 * width * i;
         int bot = 3 * width * (height - 1 - i);
@@ -29,8 +26,7 @@ bool saveScreenshot(const char* filename, int width, int height) {
             std::swap(pixels[top + j], pixels[bot + j]);
         }
     }
-    
-    // Simple PPM format (opens everywhere, no PNG complexity)
+
     FILE* f = fopen(filename, "wb");
     if (!f) return false;
     fprintf(f, "P6\n%d %d\n255\n", width, height);
@@ -40,14 +36,14 @@ bool saveScreenshot(const char* filename, int width, int height) {
     return true;
 }
 
-
-const int WINDOW_WIDTH  = 1280;
+const int WINDOW_WIDTH = 1280;
 const int WINDOW_HEIGHT = 720;
 
 static uint32_t gFrameIndex = 0;
-static float    gCenterX    = 0.0f;
-static float    gCenterZ    = 0.0f;
-static float    gRadiusXZ   = 1.0f;
+static float gCenterX = 0.0f;
+static float gCenterZ = 0.0f;
+static float gRadiusXZ = 1.0f;
+static int gCurrentMode = 0;
 
 static void glfw_error_callback(int error, const char* description) {
     std::cerr << "GLFW Error " << error << ": " << description << std::endl;
@@ -55,9 +51,8 @@ static void glfw_error_callback(int error, const char* description) {
 
 std::string loadTextFile(const char* path) {
     std::ifstream file(path);
-    if (!file.is_open()) {
+    if (!file.is_open())
         throw std::runtime_error(std::string("Failed to open file: ") + path);
-    }
     std::stringstream ss;
     ss << file.rdbuf();
     return ss.str();
@@ -67,7 +62,6 @@ GLuint compileShader(GLenum type, const char* src) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &src, nullptr);
     glCompileShader(shader);
-
     GLint status = 0;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
     if (!status) {
@@ -85,7 +79,6 @@ GLuint compileComputeShader(const char* src) {
     GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
     glShaderSource(shader, 1, &src, nullptr);
     glCompileShader(shader);
-
     GLint status = 0;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
     if (!status) {
@@ -102,15 +95,12 @@ GLuint compileComputeShader(const char* src) {
 GLuint createProgram(const char* vsPath, const char* fsPath) {
     std::string vsSrc = loadTextFile(vsPath);
     std::string fsSrc = loadTextFile(fsPath);
-
     GLuint vs = compileShader(GL_VERTEX_SHADER, vsSrc.c_str());
     GLuint fs = compileShader(GL_FRAGMENT_SHADER, fsSrc.c_str());
-
     GLuint program = glCreateProgram();
     glAttachShader(program, vs);
     glAttachShader(program, fs);
     glLinkProgram(program);
-
     GLint status = 0;
     glGetProgramiv(program, GL_LINK_STATUS, &status);
     if (!status) {
@@ -121,7 +111,6 @@ GLuint createProgram(const char* vsPath, const char* fsPath) {
         std::cerr << "Program link error:\n" << log << std::endl;
         throw std::runtime_error("Program link failed");
     }
-
     glDeleteShader(vs);
     glDeleteShader(fs);
     return program;
@@ -130,11 +119,9 @@ GLuint createProgram(const char* vsPath, const char* fsPath) {
 GLuint createComputeProgram(const char* csPath) {
     std::string csSrc = loadTextFile(csPath);
     GLuint cs = compileComputeShader(csSrc.c_str());
-
     GLuint program = glCreateProgram();
     glAttachShader(program, cs);
     glLinkProgram(program);
-
     GLint status = 0;
     glGetProgramiv(program, GL_LINK_STATUS, &status);
     if (!status) {
@@ -145,23 +132,20 @@ GLuint createComputeProgram(const char* csPath) {
         std::cerr << "Compute program link error:\n" << log << std::endl;
         throw std::runtime_error("Compute program link failed");
     }
-
     glDeleteShader(cs);
     return program;
 }
 
-// ===== Mesh data structures (match SSBO layout) =====
-
 struct Vertex {
-    float px, py, pz, pw; // position
-    float nx, ny, nz, nw; // normal
+    float px, py, pz, pw;
+    float nx, ny, nz, nw;
 };
 
 struct Triangle {
     uint32_t v0, v1, v2, w;
 };
 
-std::vector<Vertex>   gVertices;
+std::vector<Vertex> gVertices;
 std::vector<Triangle> gTriangles;
 
 bool loadOBJ_Assimp(const std::string& path) {
@@ -172,12 +156,10 @@ bool loadOBJ_Assimp(const std::string& path) {
         aiProcess_JoinIdenticalVertices |
         aiProcess_GenSmoothNormals
     );
-
     if (!scene || !scene->mRootNode || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)) {
         std::cerr << "Assimp error: " << importer.GetErrorString() << std::endl;
         return false;
     }
-
     if (scene->mNumMeshes == 0) {
         std::cerr << "No meshes in file: " << path << std::endl;
         return false;
@@ -185,17 +167,15 @@ bool loadOBJ_Assimp(const std::string& path) {
 
     gVertices.clear();
     gTriangles.clear();
-
     aiMesh* mesh = scene->mMeshes[0];
-
     gVertices.reserve(mesh->mNumVertices);
+
     for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
         Vertex v{};
         v.px = mesh->mVertices[i].x;
         v.py = mesh->mVertices[i].y;
         v.pz = mesh->mVertices[i].z;
         v.pw = 1.0f;
-
         if (mesh->HasNormals()) {
             v.nx = mesh->mNormals[i].x;
             v.ny = mesh->mNormals[i].y;
@@ -205,7 +185,6 @@ bool loadOBJ_Assimp(const std::string& path) {
             v.nz = 1.0f;
         }
         v.nw = 0.0f;
-
         gVertices.push_back(v);
     }
 
@@ -216,25 +195,25 @@ bool loadOBJ_Assimp(const std::string& path) {
         Triangle t{};
         t.v0 = face.mIndices[0];
         t.v1 = face.mIndices[1];
-               t.v2 = face.mIndices[2];
-        t.w  = 0;
+        t.v2 = face.mIndices[2];
+        t.w = 0;
         gTriangles.push_back(t);
     }
 
-    // Compute bounds in XZ for centering
-    float minX =  1e30f, maxX = -1e30f;
-    float minZ =  1e30f, maxZ = -1e30f;
+    float minX = 1e30f, maxX = -1e30f;
+    float minZ = 1e30f, maxZ = -1e30f;
     for (const auto& v : gVertices) {
         minX = std::min(minX, v.px);
         maxX = std::max(maxX, v.px);
         minZ = std::min(minZ, v.pz);
         maxZ = std::max(maxZ, v.pz);
     }
-    gCenterX  = 0.5f * (minX + maxX);
-    gCenterZ  = 0.5f * (minZ + maxZ);
-    float rX  = 0.5f * (maxX - minX);
-    float rZ  = 0.5f * (maxZ - minZ);
-    gRadiusXZ = std::max(rX, rZ) * 1.05f; // small margin
+
+    gCenterX = 0.5f * (minX + maxX);
+    gCenterZ = 0.5f * (minZ + maxZ);
+    float rX = 0.5f * (maxX - minX);
+    float rZ = 0.5f * (maxZ - minZ);
+    gRadiusXZ = std::max(rX, rZ) * 1.05f;
 
     std::cout << "Loaded " << gVertices.size() << " vertices, "
               << gTriangles.size() << " triangles from " << path << std::endl;
@@ -244,9 +223,24 @@ bool loadOBJ_Assimp(const std::string& path) {
     return true;
 }
 
+static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (key == GLFW_KEY_SPACE && action == GLFW_PRESS) {
+        gCurrentMode = (gCurrentMode + 1) % 4;
+        gFrameIndex = 0;
+        printf("Mode %d ", gCurrentMode);
+        if (gCurrentMode == 0) printf("(BRILLIANCE)\n");
+        else if (gCurrentMode == 1) printf("(DIFFUSE)\n");
+        else if (gCurrentMode == 2) printf("(BOUNCES)\n");
+        else printf("(FIRE)\n");
+    }
+    if (key == GLFW_KEY_R && action == GLFW_PRESS) {
+        gFrameIndex = 0;
+        printf("RESET frames: %d\n", gFrameIndex);
+    }
+}
+
 int main() {
     glfwSetErrorCallback(glfw_error_callback);
-
     if (!glfwInit()) {
         std::cerr << "Failed to initialize GLFW\n";
         return -1;
@@ -258,7 +252,7 @@ int main() {
 
     GLFWwindow* window = glfwCreateWindow(
         WINDOW_WIDTH, WINDOW_HEIGHT,
-        "Diamond Path Tracer - Top View",
+        "Diamond Analyzer - SPACE=Mode R=Reset (Frames: 0/2000)",
         nullptr, nullptr
     );
     if (!window) {
@@ -269,6 +263,7 @@ int main() {
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+    glfwSetKeyCallback(window, key_callback);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         std::cerr << "Failed to initialize GLAD\n";
@@ -278,7 +273,7 @@ int main() {
     }
 
     std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
-    std::cout << "Renderer: "      << glGetString(GL_RENDERER) << std::endl;
+    std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
 
     if (!loadOBJ_Assimp("models/diamond3.obj")) {
         std::cerr << "Failed to load models/diamond3.obj\n";
@@ -286,11 +281,9 @@ int main() {
         glfwTerminate();
         return -1;
     }
-    // Get window size
+
     int width, height;
     glfwGetFramebufferSize(window, &width, &height);
-
-    // Use square region centered in window
     int size = std::min(width, height);
     int x = (width - size) / 2;
     int y = (height - size) / 2;
@@ -301,39 +294,25 @@ int main() {
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
 
-    // Accumulation texture
     GLuint renderTexture = 0;
     glGenTextures(1, &renderTexture);
     glBindTexture(GL_TEXTURE_2D, renderTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F,
-                 WINDOW_WIDTH, WINDOW_HEIGHT, 0,
-                 GL_RGBA, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, WINDOW_WIDTH, WINDOW_HEIGHT, 0, GL_RGBA, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindImageTexture(0, renderTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
 
-    glBindImageTexture(0, renderTexture, 0, GL_FALSE, 0,
-                       GL_WRITE_ONLY, GL_RGBA32F);
-
-    // SSBOs
     GLuint vertexBuffer = 0, triangleBuffer = 0;
     glGenBuffers(1, &vertexBuffer);
     glGenBuffers(1, &triangleBuffer);
-
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, vertexBuffer);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 gVertices.size() * sizeof(Vertex),
-                 gVertices.data(),
-                 GL_STATIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, gVertices.size() * sizeof(Vertex), gVertices.data(), GL_STATIC_DRAW);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, vertexBuffer);
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, triangleBuffer);
-    glBufferData(GL_SHADER_STORAGE_BUFFER,
-                 gTriangles.size() * sizeof(Triangle),
-                 gTriangles.data(),
-                 GL_STATIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, gTriangles.size() * sizeof(Triangle), gTriangles.data(), GL_STATIC_DRAW);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, triangleBuffer);
 
-    // Shaders
     GLuint computeProgram = 0;
     try {
         computeProgram = createComputeProgram("shaders/raytrace.comp");
@@ -346,10 +325,7 @@ int main() {
 
     GLuint displayProgram = 0;
     try {
-        displayProgram = createProgram(
-            "shaders/fullscreen.vert",
-            "shaders/display.frag"
-        );
+        displayProgram = createProgram("shaders/fullscreen.vert", "shaders/display.frag");
     } catch (const std::exception& e) {
         std::cerr << "Display program error: " << e.what() << std::endl;
         glfwDestroyWindow(window);
@@ -357,22 +333,21 @@ int main() {
         return -1;
     }
 
-    GLint uResolutionLoc   = glGetUniformLocation(computeProgram, "uResolution");
-    GLint uNumVerticesLoc  = glGetUniformLocation(computeProgram, "uNumVertices");
+    GLint uResolutionLoc = glGetUniformLocation(computeProgram, "uResolution");
+    GLint uNumVerticesLoc = glGetUniformLocation(computeProgram, "uNumVertices");
     GLint uNumTrianglesLoc = glGetUniformLocation(computeProgram, "uNumTriangles");
-    GLint uFrameIndexLoc   = glGetUniformLocation(computeProgram, "uFrameIndex");
-    GLint uModeLoc         = glGetUniformLocation(computeProgram, "uMode");
-    GLint uCenterLoc       = glGetUniformLocation(computeProgram, "uCenterXZ");
-    GLint uRadiusLoc       = glGetUniformLocation(computeProgram, "uRadius");
+    GLint uFrameIndexLoc = glGetUniformLocation(computeProgram, "uFrameIndex");
+    GLint uModeLoc = glGetUniformLocation(computeProgram, "uMode");
+    GLint uCenterLoc = glGetUniformLocation(computeProgram, "uCenterXZ");
+    GLint uRadiusLoc = glGetUniformLocation(computeProgram, "uRadius");
+    GLint uDispFrameLoc = glGetUniformLocation(displayProgram, "uFrameIndex");
 
-    GLint uDispFrameLoc    = glGetUniformLocation(displayProgram, "uFrameIndex");
-
-    // Clear accumulation
     std::vector<float> zeroData(WINDOW_WIDTH * WINDOW_HEIGHT * 4, 0.0f);
     glBindTexture(GL_TEXTURE_2D, renderTexture);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                    WINDOW_WIDTH, WINDOW_HEIGHT,
-                    GL_RGBA, GL_FLOAT, zeroData.data());
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, GL_RGBA, GL_FLOAT, zeroData.data());
+
+    printf("CONTROLS: SPACE = cycle modes (0=Brilliance,3=Fire), R = reset, ESC=quit\n");
+    printf("Progress shown in title bar: Frames current/max\n");
 
     const uint32_t MAX_FRAMES = 1000;
 
@@ -380,20 +355,17 @@ int main() {
         glfwPollEvents();
 
         bool accumulating = (gFrameIndex < MAX_FRAMES);
-        int mode = 0; // 0 = full dielectric, 1 = diffuse debug, 2 = bounce heatmap
+        int mode = gCurrentMode;
 
         if (accumulating) {
             glUseProgram(computeProgram);
+
             if (uResolutionLoc >= 0)
-                glUniform2f(uResolutionLoc,
-                            (float)WINDOW_WIDTH,
-                            (float)WINDOW_HEIGHT);
+                glUniform2f(uResolutionLoc, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT);
             if (uNumVerticesLoc >= 0)
-                glUniform1ui(uNumVerticesLoc,
-                             static_cast<GLuint>(gVertices.size()));
+                glUniform1ui(uNumVerticesLoc, static_cast<GLuint>(gVertices.size()));
             if (uNumTrianglesLoc >= 0)
-                glUniform1ui(uNumTrianglesLoc,
-                             static_cast<GLuint>(gTriangles.size()));
+                glUniform1ui(uNumTrianglesLoc, static_cast<GLuint>(gTriangles.size()));
             if (uFrameIndexLoc >= 0)
                 glUniform1ui(uFrameIndexLoc, gFrameIndex);
             if (uModeLoc >= 0)
@@ -403,34 +375,38 @@ int main() {
             if (uRadiusLoc >= 0)
                 glUniform1f(uRadiusLoc, gRadiusXZ);
 
-            uint32_t groupsX = (WINDOW_WIDTH  + 7) / 8;
+            uint32_t groupsX = (WINDOW_WIDTH + 7) / 8;
             uint32_t groupsY = (WINDOW_HEIGHT + 7) / 8;
             glDispatchCompute(groupsX, groupsY, 1);
-
             glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
             ++gFrameIndex;
+        }
+
+        char title[128];
+        float progress = float(gFrameIndex) / float(MAX_FRAMES) * 100.0f;
+        snprintf(title, sizeof(title), "Diamond Analyzer - Mode %d - Frame %d/%d (%.1f%%)", 
+                 gCurrentMode, gFrameIndex, MAX_FRAMES, progress);
+        glfwSetWindowTitle(window, title);
+
+        if (gFrameIndex >= 500 && gFrameIndex % 250 == 0) {
+            int fbWidth, fbHeight;
+            glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
+            char filename[64];
+            const char* modeNames[] = {"brilliance", "diffuse", "bounces", "fire"};
+            snprintf(filename, sizeof(filename), "diamond_%s_%04d.ppm", modeNames[gCurrentMode], gFrameIndex);
+            saveScreenshot(filename, fbWidth, fbHeight);
         }
 
         glClear(GL_COLOR_BUFFER_BIT);
         glUseProgram(displayProgram);
         if (uDispFrameLoc >= 0)
             glUniform1ui(uDispFrameLoc, gFrameIndex == 0 ? 1u : gFrameIndex);
-
         glBindVertexArray(vao);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, renderTexture);
         glDrawArrays(GL_TRIANGLES, 0, 3);
-
         glfwSwapBuffers(window);
-
-        if (gFrameIndex >= 500 && (gFrameIndex % 100 == 0)) {
-            int width, height;
-            glfwGetFramebufferSize(window, &width, &height);
-            char filename[64];
-            snprintf(filename, sizeof(filename), "diamond_%04d.ppm", gFrameIndex);
-            saveScreenshot(filename, width, height);
-        }
-
     }
 
     glDeleteProgram(computeProgram);
@@ -439,8 +415,8 @@ int main() {
     glDeleteBuffers(1, &vertexBuffer);
     glDeleteBuffers(1, &triangleBuffer);
     glDeleteVertexArrays(1, &vao);
-
     glfwDestroyWindow(window);
     glfwTerminate();
+
     return 0;
 }
