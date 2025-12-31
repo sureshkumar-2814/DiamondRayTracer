@@ -14,6 +14,8 @@
 #include <GLFW/glfw3.h>
 #include <cstdio>
 #include <cstring>
+#include "spectral.h"
+
 
 bool saveScreenshot(const char* filename, int width, int height) {
     std::vector<unsigned char> pixels(3 * width * height);
@@ -228,10 +230,11 @@ static void key_callback(GLFWwindow* window, int key, int scancode, int action, 
         gCurrentMode = (gCurrentMode + 1) % 4;
         gFrameIndex = 0;
         printf("Mode %d ", gCurrentMode);
-        if (gCurrentMode == 0) printf("(BRILLIANCE)\n");
-        else if (gCurrentMode == 1) printf("(DIFFUSE)\n");
-        else if (gCurrentMode == 2) printf("(BOUNCES)\n");
-        else printf("(FIRE)\n");
+        if (gCurrentMode == 0) printf("(SPECTRAL BRILLIANCE - White light dispersion)\n"); 
+        else if (gCurrentMode == 1) printf("(DIFFUSE DEBUG)\n"); 
+        else if (gCurrentMode == 2) printf("(BOUNCE HEATMAP)\n"); 
+        else printf("(SPECTRAL FIRE - Sunlight dispersion)\n");
+
     }
     if (key == GLFW_KEY_R && action == GLFW_PRESS) {
         gFrameIndex = 0;
@@ -275,8 +278,8 @@ int main() {
     std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
     std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
 
-    if (!loadOBJ_Assimp("models/diamond3.obj")) {
-        std::cerr << "Failed to load models/diamond3.obj\n";
+    if (!loadOBJ_Assimp("models/diamond7.obj")) {
+        std::cerr << "Failed to load models/diamond7.obj\n";
         glfwDestroyWindow(window);
         glfwTerminate();
         return -1;
@@ -389,7 +392,7 @@ int main() {
                  gCurrentMode, gFrameIndex, MAX_FRAMES, progress);
         glfwSetWindowTitle(window, title);
 
-        if (gFrameIndex >= 500 && gFrameIndex % 250 == 0) {
+        if (gFrameIndex >= 100 && gFrameIndex % 100 == 0) {
             int fbWidth, fbHeight;
             glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
             char filename[64];

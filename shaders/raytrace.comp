@@ -1,6 +1,15 @@
 
 #version 430 core
 
+// ============= SPECTRAL CONSTANTS =============
+const float MIN_WAVELENGTH = 380.0;
+const float MAX_WAVELENGTH = 780.0;
+
+const float VISIBLE_WAVELENGTHS[11] = float[11](
+    380.0, 420.0, 460.0, 500.0, 540.0, 580.0, 
+    620.0, 660.0, 700.0, 740.0, 780.0
+);
+
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(rgba32f) uniform image2D outputImage;
@@ -106,19 +115,49 @@ bool refractRay(vec3 I, vec3 N, float etaI, float etaT, out vec3 T) {
     return true;
 }
 
-// Original brilliance IOR (Mode 0)
-float iorDiamondForChannel(int c) {
-    if (c == 0) return 2.41;
-    if (c == 1) return 2.44;
-    return 2.47;
+// Sellmeier equation for diamond (accurate across spectrum)
+float iorDiamondForWavelength(float wavelength_nm) {
+    float lambda_um = wavelength_nm / 1000.0;
+    float l2 = lambda_um * lambda_um;
+    
+    // Sellmeier coefficients (CRC Handbook of Chemistry & Physics)
+    float B1 = 0.3306;
+    float C1 = 0.1750 * 0.1750;
+    float B2 = 4.3356;
+    float C2 = 0.1060 * 0.1060;
+    
+    float n2 = 1.0 + B1*l2/(l2-C1) + B2*l2/(l2-C2);
+    return sqrt(max(n2, 1.0));
 }
 
-// Original white dome (Mode 0)
-vec3 sampleEnvironment(vec3 dir) {
-    float up   = max(dir.y, 0.0);
-    float dome = smoothstep(0.7, 1.0, up);
-    return vec3(0.01) + vec3(0.6) * dome;
+// Legacy function for backward compatibility (single-wavelength)
+float iorDiamondForChannel(int c) {
+    float waves[3] = float[](650.0, 550.0, 450.0); // R, G, B
+    return iorDiamondForWavelength(waves[c]);
 }
+
+
+// Updated for sunlight + sky dome
+// FIXED: Much brighter dome for brilliance
+// RESTORED: Original dome brightness + subtle sun
+vec3 sampleEnvironment(vec3 dir) {
+    // ORIGINAL dome logic (worked well)
+    float up = max(dir.y, 0.0); 
+    float dome = smoothstep(0.7, 1.0, up);
+    vec3 skyColor = vec3(0.02) + vec3(0.8) * dome;  // Slightly brighter
+    
+    // Add controlled sun disk
+    vec3 sunDir = normalize(vec3(0.7, 1.2, 0.7));
+    float sunDot = max(dot(dir, sunDir), 0.0);
+    if (sunDot > 0.97) {
+        skyColor += vec3(3.0);  // Controlled boost
+    }
+    
+    return skyColor;
+}
+
+
+
 
 // Fire: 3 colored point lights (Mode 3)
 vec3 sampleFireEnvironment(vec3 dir) {
@@ -139,13 +178,52 @@ vec3 sampleFireEnvironment(vec3 dir) {
 }
 
 // Fire dispersion IOR
-float iorDiamondForWavelength(float lambda_nm) {
-    float lambda_um = lambda_nm * 1e-3;
-    float l2 = lambda_um * lambda_um;
-    float B1 = 0.3306 * l2 / (l2 - 0.1750 * 0.1750);
-    float B2 = 4.3356 * l2 / (l2 - 0.1060 * 0.1060);
-    return sqrt(1.0 + B1 + B2);
+//float iorDiamondForWavelength(float lambda_nm) {
+    //float lambda_um = lambda_nm * 1e-3;
+    //float l2 = lambda_um * lambda_um;
+    //float B1 = 0.3306 * l2 / (l2 - 0.1750 * 0.1750);
+    //float B2 = 4.3356 * l2 / (l2 - 0.1060 * 0.1060);
+    //return sqrt(1.0 + B1 + B2);
+//}
+
+// CIE 1931 standard observer wavelength to RGB
+vec3 wavelengthToRGB(float wavelength_nm) {
+    float wave = wavelength_nm;
+    float r = 0.0, g = 0.0, b = 0.0;
+    
+    if (wave < 420.0) {
+        r = 0.3 + 0.7 * (1.0 - (420.0 - wave) / 40.0);
+        b = 1.0;
+    }
+    else if (wave < 490.0) {
+        b = 1.0;
+        g = (wave - 420.0) / 70.0;
+    }
+    else if (wave < 575.0) {
+        b = 1.0 - (wave - 490.0) / 85.0;
+        g = 1.0;
+    }
+    else if (wave < 620.0) {
+        r = (wave - 575.0) / 45.0;
+        g = 1.0;
+    }
+    else if (wave < 750.0) {
+        r = 1.0;
+        g = 1.0 - (wave - 620.0) / 130.0;
+    }
+    else {
+        r = max(1.0 - (wave - 750.0) / 30.0, 0.3);
+    }
+    
+    // Intensity correction (less bright at edges)
+    float intensity = 1.0;
+    if (wave < 420.0 || wave > 700.0) {
+        intensity = 0.3;
+    }
+    
+    return vec3(r, g, b) * intensity;
 }
+
 
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -225,188 +303,207 @@ void main() {
         return;
     }
 
-    // Mode 3: FIRE (3 wavelengths)
+    // Mode 3: FIRE with DIRECTIONAL SUNLIGHT (spectral dispersion)
     if (uMode == 3) {
-        const int SAMPLES_PER_FRAME = 4;
-        const int MAX_DEPTH = 12;
-        vec3 sampleSum = vec3(0.0);
-
-        for (int s = 0; s < SAMPLES_PER_FRAME; ++s) {
-            vec2 jitter = vec2(rand01(seed), rand01(seed));
-            vec2 uv = (vec2(pixel) + jitter) / uResolution;
-            vec2 ndcJ = uv * 2.0 - 1.0;
-            float xj = uCenterXZ.x + ndcJ.x * radiusXZ;
-            float zj = uCenterXZ.y + ndcJ.y * radiusXZ;
-
-            vec3 rayOrigin = vec3(xj, camY, zj);
-            vec3 rayDir = vec3(0.0, -1.0, 0.0);
-            bool insideDiamond = false;
-            float throughput = 1.0;
-
-            // 3 wavelengths for fire
-            float wavelengths[3] = float[](650.0, 550.0, 450.0); // R,G,B
-            vec3 radiance = vec3(0.0);
-
-            for (int c = 0; c < 3; ++c) {
-                vec3 rayDirC = rayDir;
-                bool insideC = insideDiamond;
-                float tputC = throughput;
-
-                for (int depth = 0; depth < MAX_DEPTH; ++depth) {
-                    Hit closest; closest.t = 1e30; bool hit = false;
-                    for (uint i = 0u; i < uNumTriangles; ++i) {
-                        Hit h;
-                        if (rayTriangleIntersect(rayOrigin, rayDirC, i, h) && h.t < closest.t) {
-                            closest = h; hit = true;
-                        }
-                    }
-
-                    if (!hit) {
-                        vec3 env = sampleFireEnvironment(rayDirC);
-                        radiance[c] += tputC * env[c];
-                        break;
-                    }
-
-                    vec3 N = normalize(closest.normal);
-                    if (dot(N, rayDirC) > 0.0) N = -N;
-                    vec3 hitPoint = rayOrigin + rayDirC * closest.t;
-
-                    if (insideC) {
-                        float sig = 0.015 + float(c)*0.001;
-                        tputC *= exp(-sig * closest.t);
-                    }
-
-                    float nDiamond = iorDiamondForWavelength(wavelengths[c]);
-                    float etaAir = 1.0;
-                    float etaI = insideC ? nDiamond : etaAir;
-                    float etaT = insideC ? etaAir : nDiamond;
-
-                    float cosThetaI = clamp(-dot(N, rayDirC), 0.0, 1.0);
-                    float F = fresnelSchlick(cosThetaI, etaI, etaT);
-                    vec3 reflDir = reflect(rayDirC, N);
-                    vec3 refrDir;
-                    bool canRefract = refractRay(rayDirC, N, etaI, etaT, refrDir);
-
-                    float xi = rand01(seed);
-                    bool doReflect = (!canRefract) || (xi < F);
-
-                    if (doReflect) {
-                        rayDirC = normalize(reflDir);
-                    } else {
-                        insideC = !insideC;
-                        // Fire angular dispersion
-                        float angleSplit = (float(c) - 1.0) * 0.008;
-                        vec3 tangent = normalize(cross(N, vec3(0,1,0)));
-                        if (length(tangent) < 0.1) tangent = normalize(cross(N, vec3(1,0,0)));
-                        rayDirC = normalize(refrDir + tangent * angleSplit);
-                    }
-
-                    rayOrigin = hitPoint + rayDirC * 1e-3;
-
-                    if (depth >= 4) {
-                        float p = clamp(tputC, 0.05, 0.9);
-                        if (rand01(seed) > p) break;
-                        tputC /= p;
-                    }
-                }
-            }
-
-            sampleSum += radiance;
-        }
-
-        vec3 frameColor = sampleSum / float(SAMPLES_PER_FRAME);
-        vec4 prev = imageLoad(outputImage, pixel);
-        vec3 newAccum = prev.rgb + frameColor;
-        imageStore(outputImage, pixel, vec4(newAccum, 1.0));
-        return;
-    }
-
-    // Mode 0: ORIGINAL BRILLIANCE
-    const int SAMPLES_PER_FRAME = 1;
-    const int MAX_DEPTH = 8;
+    // FIRE-SPECIFIC: Higher quality for dispersion paths
+    const int SAMPLES_PER_FRAME = 12;      // More samples
+    const int MAX_DEPTH = 16;              // MORE bounces for fire paths
+    const int NUM_WAVELENGTHS = 7;         // More spectral samples
     vec3 sampleSum = vec3(0.0);
-
+    
+    // TRUE POINT SOURCE (not directional sun)
+    vec3 lightDir = normalize(vec3(1.2, 2.0, 0.8));  // Off-axis point light
+    vec3 lightIntensity = vec3(20.0);  // Very bright point source
+    
     for (int s = 0; s < SAMPLES_PER_FRAME; ++s) {
-        float rchan = rand01(seed);
-        int channel;
-        if (rchan < 1.0/3.0) channel = 0;
-        else if (rchan < 2.0/3.0) channel = 1;
-        else channel = 2;
-
-        float etaAir = 1.0;
-        float etaDiamond = iorDiamondForChannel(channel);
-
         vec2 jitter = vec2(rand01(seed), rand01(seed));
         vec2 uv = (vec2(pixel) + jitter) / uResolution;
         vec2 ndcJ = uv * 2.0 - 1.0;
         float xj = uCenterXZ.x + ndcJ.x * radiusXZ;
         float zj = uCenterXZ.y + ndcJ.y * radiusXZ;
-
+        
         vec3 rayOrigin = vec3(xj, camY, zj);
         vec3 rayDir = vec3(0.0, -1.0, 0.0);
-        float throughput = 1.0;
-        float radiance = 0.0;
         bool insideDiamond = false;
-
+        
+        // FIRE: Sample ONE wavelength per path (correct spectral path tracing)
+        float wavelength = mix(400.0, 700.0, rand01(seed));  // Full visible
+        float etaDiamond = iorDiamondForWavelength(wavelength);
+        float etaAir = 1.0;
+        
+        float throughput = 1.0;
+        vec3 radiance = vec3(0.0);
+        
         for (int depth = 0; depth < MAX_DEPTH; ++depth) {
             Hit closest; closest.t = 1e30; bool hit = false;
+            
+            // Triangle intersection (same as before)
             for (uint i = 0u; i < uNumTriangles; ++i) {
                 Hit h;
                 if (rayTriangleIntersect(rayOrigin, rayDir, i, h) && h.t < closest.t) {
                     closest = h; hit = true;
                 }
             }
-
+            
             if (!hit) {
-                vec3 env = sampleEnvironment(rayDir);
-                radiance += throughput * env[channel];
+                // FIRE: Check if ray sees the point light source
+                float lightDot = max(dot(-rayDir, lightDir), 0.0);
+                if (lightDot > 0.999) {  // Very tight cone (1° point source)
+                    radiance += throughput * lightIntensity;
+                }
+                // Dark background for fire contrast
                 break;
             }
-
+            
             vec3 N = normalize(closest.normal);
             if (dot(N, rayDir) > 0.0) N = -N;
             vec3 hitPoint = rayOrigin + rayDir * closest.t;
-
+            
+            // Reduced absorption for fire paths
             if (insideDiamond) {
-                vec3 sigma = vec3(0.03, 0.03, 0.04);
-                float sig = sigma[channel];
+                float sig = 0.008;  // Low absorption
                 throughput *= exp(-sig * closest.t);
             }
-
+            
+            // CRITICAL: Wavelength-dependent Fresnel/refraction
             float etaI = insideDiamond ? etaDiamond : etaAir;
             float etaT = insideDiamond ? etaAir : etaDiamond;
-
             float cosThetaI = clamp(-dot(N, rayDir), 0.0, 1.0);
             float F = fresnelSchlick(cosThetaI, etaI, etaT);
+            
             vec3 reflDir = reflect(rayDir, N);
-            vec3 refrDir; bool canRefract = refractRay(rayDir, N, etaI, etaT, refrDir);
-
+            vec3 refrDir;
+            bool canRefract = refractRay(rayDir, N, etaI, etaT, refrDir);
+            
             float xi = rand01(seed);
             bool doReflect = (!canRefract) || (xi < F);
-
+            
             if (doReflect) {
                 rayDir = normalize(reflDir);
-                rayOrigin = hitPoint + rayDir * 1e-3;
             } else {
                 insideDiamond = !insideDiamond;
                 rayDir = normalize(refrDir);
-                rayOrigin = hitPoint + rayDir * 1e-3;
             }
-
-            if (depth >= 4) {
-                float p = clamp(throughput, 0.05, 0.95);
+            
+            rayOrigin = hitPoint + rayDir * 1e-3;
+            
+            // FIRE: Less aggressive termination (need long paths)
+            if (depth >= 8) {
+                float p = clamp(throughput, 0.02, 0.98);
                 if (rand01(seed) > p) break;
                 throughput /= p;
             }
         }
+        
+        // Convert single wavelength path to color
+        vec3 spectralColor = wavelengthToRGB(wavelength);
+        sampleSum += radiance * spectralColor;
+    }
+    
+    vec3 frameColor = sampleSum / float(SAMPLES_PER_FRAME);
+    vec4 prev = imageLoad(outputImage, pixel);
+    vec3 newAccum = prev.rgb + frameColor;
+    imageStore(outputImage, pixel, vec4(newAccum, 1.0));
+    return;
+}
 
-        vec3 rgb = vec3(0.0);
-        rgb[channel] = radiance;
-        sampleSum += rgb;
+
+
+
+    // Mode 0: SPECTRAL BRILLIANCE (with proper dispersion)
+    const int SAMPLES_PER_FRAME = 8;  // More samples for smooth spectral rendering
+    const int MAX_DEPTH = 10;
+    vec3 sampleSum = vec3(0.0);
+
+    for (int s = 0; s < SAMPLES_PER_FRAME; ++s) {
+        // Sample a random wavelength from visible spectrum
+        float wavelength = mix(MIN_WAVELENGTH, MAX_WAVELENGTH, rand01(seed));
+        float etaDiamond = iorDiamondForWavelength(wavelength);
+        //float etaDiamond = 2.42;
+        float etaAir = 1.0;
+        
+        vec2 jitter = vec2(rand01(seed), rand01(seed));
+        vec2 uv = (vec2(pixel) + jitter) / uResolution;
+        vec2 ndcJ = uv * 2.0 - 1.0;
+        float xj = uCenterXZ.x + ndcJ.x * radiusXZ;
+        float zj = uCenterXZ.y + ndcJ.y * radiusXZ;
+        
+        vec3 rayOrigin = vec3(xj, camY, zj);
+        vec3 rayDir = normalize(vec3(0.0, -1.0, 0.0));  // Sunlight direction
+        float throughput = 1.0;
+        vec3 radiance = vec3(0.0);
+        bool insideDiamond = false;
+        
+        for (int depth = 0; depth < MAX_DEPTH; ++depth) {
+            Hit closest;
+            closest.t = 1e30;
+            bool hit = false;
+            
+            for (uint i = 0u; i < uNumTriangles; ++i) {
+                Hit h;
+                if (rayTriangleIntersect(rayOrigin, rayDir, i, h) && h.t < closest.t) {
+                    closest = h;
+                    hit = true;
+                }
+            }
+            
+            if (!hit) {
+                // Ray escaped - environment (sunlight dome)
+                vec3 env = sampleEnvironment(rayDir);
+                radiance += throughput * env;
+                break;
+            }
+            
+            vec3 N = normalize(closest.normal);
+            if (dot(N, rayDir) > 0.0) N = -N;
+            vec3 hitPoint = rayOrigin + rayDir * closest.t;
+            
+            // Absorption in diamond
+            if (insideDiamond) {
+                float absorption = 0.018;  // Was 0.03 (6x less!)
+                throughput *= exp(-absorption * closest.t);
+            }
+            
+            // Fresnel & refraction with wavelength-dependent IOR
+            float etaI = insideDiamond ? etaDiamond : etaAir;
+            float etaT = insideDiamond ? etaAir : etaDiamond;
+            float cosThetaI = clamp(-dot(N, rayDir), 0.0, 1.0);
+            float F = fresnelSchlick(cosThetaI, etaI, etaT);
+            
+            vec3 reflDir = reflect(rayDir, N);
+            vec3 refrDir;
+            bool canRefract = refractRay(rayDir, N, etaI, etaT, refrDir);
+            
+            // Probabilistic reflection/refraction
+            float xi = rand01(seed);
+            bool doReflect = (!canRefract) || (xi < F);
+            
+            if (doReflect) {
+                rayDir = normalize(reflDir);
+            } else {
+                insideDiamond = !insideDiamond;
+                rayDir = normalize(refrDir);
+            }
+            
+            rayOrigin = hitPoint + rayDir * 1e-3;
+            
+            // Russian roulette termination
+            if (depth >= 4) {
+                float p = clamp(throughput, 0.08, 0.92);
+                if (rand01(seed) > p) break;
+                throughput /= p;
+            }
+        }
+        
+        // Convert wavelength to RGB color
+        vec3 color = wavelengthToRGB(wavelength);
+        color = mix(vec3(1.0), color, 0.3);  // 70% white + 30% spectral
+        sampleSum += radiance * color;
     }
 
     vec3 frameColor = sampleSum / float(SAMPLES_PER_FRAME);
     vec4 prev = imageLoad(outputImage, pixel);
     vec3 newAccum = prev.rgb + frameColor;
     imageStore(outputImage, pixel, vec4(newAccum, 1.0));
+
 }
